@@ -1,0 +1,14 @@
+agentId: 5261cbf6-4094-4482-af0a-789d0b70d7c6
+name: Yoga Studio
+hasUi: true
+defaultView: app
+views:
+  - type: app
+  - type: widget
+    constraints:
+      minWidth: 168
+      minHeight: 168
+      maxWidth: 360
+      maxHeight: 360
+      defaultWidth: 300
+      defaultHeight: 300
