@@ -523,6 +523,9 @@ function ClassDetailView({
             {paymentState === "error" && (
               <div className="text-center">
                 <p className="text-destructive mb-4 font-light">{errorMessage}</p>
+                <p className="text-sm text-muted-foreground mb-4 font-light">
+                  Your USDC payment signature was created successfully. The payment service may be experiencing issues.
+                </p>
                 <button
                   onClick={startPurchase}
                   className="px-6 py-3 bg-stone-900 dark:bg-stone-100 text-stone-100 dark:text-stone-900 font-light tracking-wide rounded-lg"

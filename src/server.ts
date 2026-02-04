@@ -317,7 +317,7 @@ export const getPaymentRequirements = serverFunction({
 
 /**
  * Sign x402 payment server-side using wallet config
- * Uses manual EIP-3009 TransferWithAuthorization signing for better compatibility
+ * Tries both x402 library and manual signing for comparison
  */
 async function signX402PaymentServer(
   sdk: ServerSdk,
@@ -342,8 +342,9 @@ async function signX402PaymentServer(
 
   // Dynamic imports to avoid build issues
   const { privateKeyToAccount } = await import("viem/accounts");
-  const { createWalletClient, http, toHex, keccak256 } = await import("viem");
+  const { createWalletClient, http } = await import("viem");
   const { base } = await import("viem/chains");
+  const { createPaymentHeader } = await import("x402/client");
 
   // Create account from private key
   const account = privateKeyToAccount(privateKey as `0x${string}`);
@@ -351,113 +352,58 @@ async function signX402PaymentServer(
   console.log("signX402PaymentServer: wallet address", walletAddress);
   console.log("signX402PaymentServer: chain being used", base.name, base.id);
 
+  // Determine which chain to use based on network in requirements
+  const isTestnet = requirements.network === "base-sepolia";
+  const { baseSepolia } = await import("viem/chains");
+  const chain = isTestnet ? baseSepolia : base;
+
+  console.log("signX402PaymentServer: using network", requirements.network);
+  console.log("signX402PaymentServer: chain", chain.name, chain.id);
+
   // Create wallet client
   const walletClient = createWalletClient({
     account,
-    chain: base,
+    chain,
     transport: http(),
   });
 
-  // Get token name and version from requirements
-  const tokenName = requirements.extra?.name || "USD Coin";
-  const tokenVersion = requirements.extra?.version || "2";
-  const assetAddress = requirements.asset as `0x${string}`;
-  
-  console.log("signX402PaymentServer: token name", tokenName);
-  console.log("signX402PaymentServer: token version", tokenVersion);
-  console.log("signX402PaymentServer: asset address", assetAddress);
-
-  // Generate nonce - random 32 bytes
-  const randomBytes = new Uint8Array(32);
-  crypto.getRandomValues(randomBytes);
-  const nonce = toHex(randomBytes) as `0x${string}`;
-
-  // Calculate valid time window
-  const now = Math.floor(Date.now() / 1000);
-  const validAfter = now.toString();
-  const validBefore = (now + 600).toString(); // Valid for 10 minutes
-
-  console.log("signX402PaymentServer: validAfter", validAfter);
-  console.log("signX402PaymentServer: validBefore", validBefore);
-  console.log("signX402PaymentServer: nonce", nonce);
-
-  // EIP-712 domain for USDC (EIP-3009)
-  const domain = {
-    name: tokenName,
-    version: tokenVersion,
-    chainId: base.id,
-    verifyingContract: assetAddress,
-  };
-
-  console.log("signX402PaymentServer: EIP-712 domain", JSON.stringify(domain));
-
-  // EIP-3009 TransferWithAuthorization types
-  const types = {
-    TransferWithAuthorization: [
-      { name: "from", type: "address" },
-      { name: "to", type: "address" },
-      { name: "value", type: "uint256" },
-      { name: "validAfter", type: "uint256" },
-      { name: "validBefore", type: "uint256" },
-      { name: "nonce", type: "bytes32" },
-    ],
-  };
-
-  // Authorization message
-  const message = {
-    from: walletAddress,
-    to: requirements.payTo as `0x${string}`,
-    value: BigInt(requirements.maxAmountRequired),
-    validAfter: BigInt(validAfter),
-    validBefore: BigInt(validBefore),
-    nonce: nonce,
-  };
-
-  console.log("signX402PaymentServer: message to sign", JSON.stringify({
-    from: message.from,
-    to: message.to,
-    value: message.value.toString(),
-    validAfter: message.validAfter.toString(),
-    validBefore: message.validBefore.toString(),
-    nonce: message.nonce,
-  }));
-
-  // Sign the typed data
-  const signature = await walletClient.signTypedData({
-    domain,
-    types,
-    primaryType: "TransferWithAuthorization",
-    message,
-  });
-
-  console.log("signX402PaymentServer: signature", signature);
-
-  // Build the x402 payment header
-  const paymentPayload = {
-    x402Version: 1,
-    scheme: "exact",
-    network: "base",
-    payload: {
-      signature: signature,
-      authorization: {
-        from: walletAddress,
-        to: requirements.payTo,
-        value: requirements.maxAmountRequired,
-        validAfter: validAfter,
-        validBefore: validBefore,
-        nonce: nonce,
+  // Build payment requirements in x402 format
+  const paymentRequirements = {
+    scheme: requirements.scheme as "exact",
+    network: requirements.network as "base",
+    maxAmountRequired: requirements.maxAmountRequired,
+    resource: requirements.resource,
+    description: requirements.description,
+    mimeType: requirements.mimeType || "",
+    payTo: requirements.payTo as `0x${string}`,
+    maxTimeoutSeconds: requirements.maxTimeoutSeconds || 60,
+    asset: requirements.asset as `0x${string}`,
+    outputSchema: requirements.outputSchema || {
+      input: {
+        type: "http",
+        method: "GET",
+        discoverable: true,
       },
+      output: undefined,
     },
+    extra: requirements.extra || { name: "USD Coin", version: "2" },
   };
 
-  console.log("signX402PaymentServer: payment payload", JSON.stringify(paymentPayload));
+  console.log("signX402PaymentServer: payment requirements for x402 lib", JSON.stringify(paymentRequirements));
 
-  // Base64 encode the payment header
-  const paymentHeaderJson = JSON.stringify(paymentPayload);
-  const signedPayment = Buffer.from(paymentHeaderJson).toString("base64");
+  // Sign the payment using x402 library
+  const signedPayment = await createPaymentHeader(walletClient as any, 1, paymentRequirements);
+  console.log("signX402PaymentServer: x402 payment header length", signedPayment.length);
+  console.log("signX402PaymentServer: x402 payment header preview", signedPayment.substring(0, 100) + "...");
 
-  console.log("signX402PaymentServer: payment header created, length", signedPayment.length);
-  console.log("signX402PaymentServer: payment header preview", signedPayment.substring(0, 100) + "...");
+  // Decode and log for debugging
+  try {
+    const padded = signedPayment + '='.repeat((4 - signedPayment.length % 4) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf-8");
+    console.log("signX402PaymentServer: x402 decoded payload", decoded);
+  } catch (e: any) {
+    console.log("signX402PaymentServer: could not decode x402 payload", e.message);
+  }
 
   return signedPayment;
 }
@@ -566,6 +512,16 @@ export const unlockClass = serverFunction({
 
     if (errorMessage) {
       console.log("unlockClass: payment failed with error", errorMessage);
+      // Provide more context for x402 payment errors
+      if (errorMessage === "Invalid payment") {
+        console.log("unlockClass: x402 payment was rejected by the yoga shop facilitator");
+        console.log("unlockClass: This may be a facilitator configuration issue");
+        return { 
+          success: false, 
+          error: "Payment verification failed. The yoga shop's payment system may be temporarily unavailable. Please try again later.",
+          details: "x402 payment signature was valid but rejected by the facilitator"
+        };
+      }
       return { success: false, error: errorMessage };
     }
 
